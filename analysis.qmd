@@ -13,3 +13,90 @@ library(purrr)
 library(leaflet)
 library(jsonlite)
 ```
+
+```{r}
+raw <- read_json("data/wildfires.geojson")
+length(raw$features)
+```
+
+```{r}
+fire_1 <- raw$features[[1]]
+names(fire_1)
+
+# First ring [[1]], first coordinate pair [[1]]
+fire_1$geometry$coordinates[[1]][[1]]
+```
+
+```{r}
+#| cache: true
+fires <- tibble(features = raw$features) |>
+  unnest_wider(features) |>
+  unnest_wider(properties) |>
+  # Prefix with "geometry_" to avoid colliding with top-level `type`
+  unnest_wider(geometry, names_sep = "_") |>
+  select(incident, gis_acres, fire_year, agency, state, geometry_coordinates) |>
+  mutate(
+    gis_acres = as.numeric(gis_acres),
+    fire_year = as.integer(fire_year)
+  )
+```
+
+```{r}
+fires |>
+  summarize(total_acres = sum(gis_acres), .by = fire_year) |>
+  ggplot(aes(x = fire_year, y = total_acres)) +
+  geom_line(color = "firebrick", linewidth = 0.8) +
+  # Format large acre counts with commas instead of scientific notation
+  scale_y_continuous(labels = scales::label_comma()) +
+  labs(
+    title = "Total Acres Burned by Wildfires per Year (1990–2023)",
+    x = "Year",
+    y = "Total Acres Burned",
+    caption = "Source: Historical Wildfire Perimeters (wildfires.geojson)"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+big_fires <- fires |>
+  filter(gis_acres >= 100000) |>
+  mutate(
+    # Average all longitudes (element 1) and latitudes (element 2) in outer ring coords[[1]]
+    lon = map_dbl(geometry_coordinates, \(coords) mean(map_dbl(coords[[1]], 1))),
+    lat = map_dbl(geometry_coordinates, \(coords) mean(map_dbl(coords[[1]], 2)))
+  )
+```
+
+```{r}
+top_10 <- big_fires |>
+  slice_max(gis_acres, n = 10)
+
+base_map <- leaflet() |>
+  # Esri WorldTopoMap works in GitHub Codespaces without an API key or Referer block
+  addProviderTiles(providers$Esri.WorldTopoMap) |>
+  fitBounds(lng1 = -123.5, lat1 = 33.3, lng2 = -100.0, lat2 = 43.1)
+
+# Layer each of the 10 fire boundary polygons and its popup onto base_map
+reduce(
+  seq_len(nrow(top_10)),
+  \(map, i) {
+    ring <- top_10$geometry_coordinates[[i]][[1]]
+    map |>
+      addPolygons(
+        lng = map_dbl(ring, 1),
+        lat = map_dbl(ring, 2),
+        color = "firebrick",
+        weight = 2,
+        fillOpacity = 0.5,
+        popup = paste0(
+          "<b>", top_10$incident[[i]], "</b> (", top_10$fire_year[[i]], ")<br>",
+          scales::comma(round(top_10$gis_acres[[i]])), " acres"
+        )
+      )
+  },
+  .init = base_map
+)
+```
+
+
+
